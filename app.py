@@ -15,9 +15,9 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.prebuilt import create_react_agent
 
 # Set up page config
-st.set_page_config(page_title="Metformin Clinical Advisor", page_icon="💊", layout="centered")
-st.title("💊 Metformin Clinical Advisor")
-st.caption("AI Agent with Hybrid Parent-Document Retrieval over the Metformin Monograph")
+st.set_page_config(page_title="Med AI Clinical Advisor", page_icon="💊", layout="centered")
+st.title("💊 Med AI Clinical Advisor")
+st.caption("AI Agent with Hybrid Parent-Document Retrieval over the drug Monograph")
 
 # --- STEP 1: CACHED RETRIEVER SETUP ---
 @st.cache_resource(show_spinner="Initializing Clinical Retriever (this may take a minute)...")
@@ -92,7 +92,7 @@ try:
     # Declare the tool inside the loaded scope so it references the cached retriever
     @tool
     def metformin_tool(question: str) -> str:
-        """Searches the Metformin clinical monograph and guidelines. 
+        """Searches the clinical monograph and guidelines. 
         Use this tool to find clinical pharmacology, warnings, dosage, lactic acidosis risk, 
         eGFR adjustments, and contraindications. Input must be a clear search query."""
         relevant_chunks = hybrid_retriever.invoke(question)
@@ -117,7 +117,7 @@ except Exception as e:
 # --- STEP 3: SESSION STATE & CHAT INTERFACE ---
 if "messages" not in st.session_state:
     st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I am your Metformin clinical assistant. Ask me anything about its guidelines, dosing, or contraindications."}
+        {"role": "assistant", "content": "Hello! I am your MedAI clinical assistant. Ask me anything about its guidelines, dosing, or contraindications."}
     ]
 
 # Display historical messages
