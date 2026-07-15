@@ -92,7 +92,7 @@ try:
     # Declare the tool inside the loaded scope so it references the cached retriever
     @tool
     def metformin_tool(question: str) -> str:
-        """Searches the clinical monograph and guidelines. 
+        """Searches the Metformin clinical monograph and guidelines. 
         Use this tool to find clinical pharmacology, warnings, dosage, lactic acidosis risk, 
         eGFR adjustments, and contraindications. Input must be a clear search query."""
         relevant_chunks = hybrid_retriever.invoke(question)
