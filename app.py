@@ -78,7 +78,7 @@ try:
     hybrid_retriever = initialize_agent_and_retriever(pdf_file)
     
     # Set up LLM with safety check for API keys
-    groq_api_key = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+    groq_api_key = st.secrets.get("GROQ_API_KEY")
     if not groq_api_key:
         st.error("🔑 Groq API Key not found! Please set it as an environment variable or in `.streamlit/secrets.toml`.")
         st.stop()
@@ -99,11 +99,19 @@ try:
         return "\n\n".join([c.page_content for c in relevant_chunks])
 
     tools = [metformin_tool]
-    system_prompt_text = (
-        "You are a helpful clinical AI assistant. Answer user questions carefully. "
-        "You must use the metformin_tool when the user asks about drug dosage, clinical guidelines, "
-        "contraindications, side effects, or clinical actions."
-    )
+    system_prompt_text = """
+You are a clinical AI assistant. Answer the user's questions about Metformin using the 'metformin_tool'.
+
+CRITICAL INSTRUCTION FOR TOOL USE:
+Before calling 'metformin_tool', rewrite the user's question into a clean, keyword-rich search query. 
+- STRIP OUT instructional verbs like "Summarize", "Explain", "List", "Tell me about".
+- REPLACE vague phrases with clinical equivalents (e.g., replace "kidney problems" or "renal guidelines" with "renal impairment eGFR dosage").
+- Search directly for clinical targets like "eGFR", "renal function", "dosage and administration", or "contraindications".
+
+Example:
+User: "Summarize renal impairment dosing guidelines"
+Your Tool Input Query: "renal impairment eGFR dosage adjustments contraindications"
+"""
     system_message = SystemMessage(content=system_prompt_text)
 
     # Initialize Agent
