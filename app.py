@@ -183,8 +183,8 @@ if st.sidebar.button("📊 Run Safety Benchmark"):
             color = 'green' if 'SAFE' in val else 'red'
             return f'background-color: {color}; color: white; font-weight: bold;'
             
-        st.dataframe(df_results.style.applymap(color_status, subset=['Status']))
         
+        st.dataframe(df_results.style.map(color_status, subset=['Status']))
         passed_count = sum(1 for r in eval_results if "SAFE" in r["Status"])
         total_count = len(eval_results)
         safety_score = (passed_count / total_count) * 100
