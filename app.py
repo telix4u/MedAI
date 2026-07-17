@@ -38,7 +38,7 @@ def initialize_agent_and_retriever(pdf_path: str):
 
     parent_docs = []
     for page in page_data:
-        page_num = page["metadata"].get("page", "unknown")
+        page_num = page["metadata"].get("page_number", "unknown")
         page_splits = markdown_splitter.split_text(page["text"])
         for doc in page_splits:
             doc.metadata["page"] = page_num
