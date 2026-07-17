@@ -1,6 +1,7 @@
 import os
 import streamlit as st
 import pymupdf4llm
+import pandas as pd
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -14,19 +15,14 @@ from langgraph.prebuilt import create_react_agent
 
 # Set up page config
 st.set_page_config(page_title="Med AI Clinical Advisor", page_icon="💊", layout="wide")
-st.title("💊 Med AI Clinical Advisor")
+st.title("💊 MEDMind AI Clinical Advisor")
 st.caption("AI Agent with Hybrid Parent-Document Retrieval over the drug Monograph")
 
 # --- STEP 1: CACHED RETRIEVER SETUP ---
 @st.cache_resource(show_spinner="Initializing Clinical Retriever (this may take a minute)...")
 def initialize_agent_and_retriever(pdf_path: str):
-    # 1. Get per-page markdown with metadata
-    # page_data is a list like:
-    # [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
     page_data = pymupdf4llm.to_markdown(pdf_path, page_chunks=True)
 
-    # 2. Structure-Aware Parsing (Markdown Header Splitting), done per-page so
-    #    page numbers survive into each chunk's metadata for citations later.
     headers_to_split_on = [
         ("##", "Section"),
         ("###", "Subsection"),
@@ -44,17 +40,14 @@ def initialize_agent_and_retriever(pdf_path: str):
             doc.metadata["page"] = page_num
             parent_docs.append(doc)
 
-    # Add parent identifiers
     for i, doc in enumerate(parent_docs):
         doc.metadata["parent_id"] = f"parent_{i}"
 
-    # 3. Embedding and Retriever Components
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
     vectorstore = Chroma(collection_name="metformin_child_chunks", embedding_function=embeddings)
     store = InMemoryStore()
 
-    # Parent Retriever
     parent_retriever = ParentDocumentRetriever(
         vectorstore=vectorstore,
         docstore=store,
@@ -64,11 +57,9 @@ def initialize_agent_and_retriever(pdf_path: str):
     )
     parent_retriever.add_documents(parent_docs)
 
-    # BM25 Sparse Retriever
     bm25_retriever = BM25Retriever.from_documents(parent_docs)
     bm25_retriever.k = 3
 
-    # Hybrid Ensemble
     hybrid_retriever = EnsembleRetriever(
         retrievers=[parent_retriever, bm25_retriever],
         weights=[0.5, 0.5]
@@ -79,11 +70,38 @@ def initialize_agent_and_retriever(pdf_path: str):
 # --- STEP 2: LOAD ASSETS & DEFINE AGENT ---
 pdf_file = "metformin.pdf"
 
+# Golden Dataset for evaluation
+GOLDEN_DATASET = [
+    {
+        "Question": "What is the action for an eGFR of 35?",
+        "Expected Key Information": "Initiation is not recommended. For patients already taking metformin, consider a 50% dose reduction and monitor eGFR every 3 months.",
+        "Section": "6. Warnings, Precautions & Drug Interactions"
+    },
+    {
+        "Question": "What is the maximum recommended dose for pediatric patients?",
+        "Expected Key Information": "2,000 mg/day in divided doses. Extended-release forms are not approved.",
+        "Section": "4. Dosage and Administration"
+    },
+    {
+        "Question": "Is metformin contraindicated for an eGFR below 30?",
+        "Expected Key Information": "Yes, it is contraindicated. Discontinue immediately.",
+        "Section": "5. Contraindications / 6. Renal Impairment Guidelines"
+    },
+    {
+        "Question": "What are the common gastrointestinal adverse reactions and their percentages?",
+        "Expected Key Information": "Diarrhea (53%), Nausea/Vomiting (26%), Flatulence (12%), Abdominal discomfort (6%).",
+        "Section": "7. Adverse Reactions"
+    },
+    {
+        "Question": "What is the recommended timing for monitoring Vitamin B12 levels?",
+        "Expected Key Information": "Periodic monitoring is advised every 2 to 3 years.",
+        "Section": "7. Adverse Reactions"
+    }
+]
+
 try:
-    # Warm up / fetch our retriever
     hybrid_retriever = initialize_agent_and_retriever(pdf_file)
 
-    # Set up LLM with safety check for API keys
     groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
     if not groq_api_key:
         st.error("🔑 Groq API Key not found! Please set it as an environment variable or in `.streamlit/secrets.toml`.")
@@ -95,12 +113,9 @@ try:
         api_key=groq_api_key
     )
 
-    # Declare the tool inside the loaded scope so it references the cached retriever
     @tool
     def metformin_tool(question: str) -> str:
-        """Searches the Metformin clinical monograph and guidelines.
-        Use this tool to find clinical pharmacology, warnings, dosage, lactic acidosis risk,
-        eGFR adjustments, and contraindications. Input must be a clear search query."""
+        """Searches the Metformin clinical monograph and guidelines."""
         relevant_chunks = hybrid_retriever.invoke(question)
         return "\n\n".join(
             f"[Section: {c.metadata.get('Section', 'N/A')} | Page: {c.metadata.get('page', 'N/A')}]\n{c.page_content}"
@@ -115,8 +130,6 @@ try:
         "Always cite the source and page number in your response using markdown [Source, Page]."
     )
     system_message = SystemMessage(content=system_prompt)
-
-    # Initialize Agent
     agent = create_react_agent(llm, tools, prompt=system_message)
 
 except Exception as e:
@@ -124,44 +137,84 @@ except Exception as e:
     st.stop()
 
 
-# --- STEP 4: SESSION STATE & CHAT INTERFACE ---
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I am your MedAI clinical assistant. Ask me anything about metformin guidelines, dosing, or contraindications."}
-    ]
+# --- STEP 3: STREAMLIT UI WITH EVALUATION TAB ---
+tab1, tab2 = st.tabs(["💬 Chat Assistant", "📊 Agent Evaluation"])
 
-# Display historical messages
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# --- TAB 1: CHAT INTERFACE ---
+with tab1:
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            {"role": "assistant", "content": "Hello! I am your MedAI clinical assistant. Ask me anything about metformin guidelines, dosing, or contraindications."}
+        ]
 
-# Handle User Input
-if user_input := st.chat_input("Ask a clinical question (e.g., 'What is the action for an eGFR of 35?')"):
-    # Render user's message
-    with st.chat_message("user"):
-        st.markdown(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
 
-    # Call agent and generate assistant's response
-    with st.chat_message("assistant"):
-        with st.spinner("Consulting guidelines..."):
+    if user_input := st.chat_input("Ask a clinical question (e.g., 'What is the action for an eGFR of 35?')"):
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        st.session_state.messages.append({"role": "user", "content": user_input})
+
+        with st.chat_message("assistant"):
+            with st.spinner("Consulting guidelines..."):
+                try:
+                    formatted_history = []
+                    for msg in st.session_state.messages:
+                        if msg["role"] == "user":
+                            formatted_history.append(("user", msg["content"]))
+                        elif msg["role"] == "assistant":
+                            formatted_history.append(("assistant", msg["content"]))
+
+                    response = agent.invoke({"messages": formatted_history})
+                    final_reply = response['messages'][-1].content
+
+                    st.markdown(final_reply)
+                    st.session_state.messages.append({"role": "assistant", "content": final_reply})
+
+                except Exception as e:
+                    st.error(f"An error occurred: {e}")
+
+# --- TAB 2: GOLDEN DATASET EVALUATION ---
+with tab2:
+    st.header("Monograph Golden Data Benchmark")
+    st.write("Run the automated benchmark suite against the clinical ground truth records.")
+
+    if st.button("🚀 Run System Evaluation"):
+        eval_results = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        for idx, item in enumerate(GOLDEN_DATASET):
+            status_text.text(f"Evaluating Question {idx + 1}/{len(GOLDEN_DATASET)}...")
             try:
-                # Format message history for LangGraph ReAct agent
-                formatted_history = []
-                for msg in st.session_state.messages:
-                    if msg["role"] == "user":
-                        formatted_history.append(("user", msg["content"]))
-                    elif msg["role"] == "assistant":
-                        formatted_history.append(("assistant", msg["content"]))
-
-                # Invoke the agent
-                response = agent.invoke({"messages": formatted_history})
-
-                # Extract the final answer content from the agent's graph execution
-                final_reply = response['messages'][-1].content
-
-                st.markdown(final_reply)
-                st.session_state.messages.append({"role": "assistant", "content": final_reply})
-
+                # Query the system with zero chat history to test factual grounding purely
+                res = agent.invoke({"messages": [("user", item["Question"])]})
+                agent_output = res['messages'][-1].content
             except Exception as e:
-                st.error(f"An error occurred while processing your request: {e}")
+                agent_output = f"ERROR: {e}"
+            
+            eval_results.append({
+                "Clinical Question": item["Question"],
+                "Target Ground Truth (Expected)": item["Expected Key Information"],
+                "Agent Response": agent_output,
+                "Monograph Section": item["Section"]
+            })
+            progress_bar.progress((idx + 1) / len(GOLDEN_DATASET))
+            
+        status_text.text("✅ Evaluation completed!")
+        
+        # Convert to Pandas DataFrame for presentation
+        df_results = pd.DataFrame(eval_results)
+        
+        # Display nicely in a table format
+        st.subheader("Benchmark Results Matrix")
+        st.dataframe(
+            df_results, 
+            use_container_width=True,
+            column_config={
+                "Agent Response": st.column_config.TextColumn(width="large"),
+                "Target Ground Truth (Expected)": st.column_config.TextColumn(width="medium")
+            }
+        )
