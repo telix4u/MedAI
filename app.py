@@ -26,7 +26,7 @@ def initialize_agent_and_retriever(pdf_path: str):
     # 1. Get per-page markdown with metadata
     page_data = pymupdf4llm.to_markdown(pdf_path, page_chunks=True)
 # page_data is a list like:
-# [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
+  # [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
     # 2. Structure-Aware Parsing (Markdown Header Splitting)
     headers_to_split_on = [
         ("##", "Section"),
@@ -37,14 +37,17 @@ def initialize_agent_and_retriever(pdf_path: str):
         strip_headers=False
     )
     #parent_docs = markdown_splitter.split_text(pdf_markdown_content)
-
     parent_docs = []
     for page in page_data:
-    page_num = page["metadata"].get("page", "unknown")
-    page_splits = markdown_splitter.split_text(page["text"])
-    for doc in page_splits:
-        doc.metadata["page"] = page_num
-        parent_docs.append(doc)
+        page_num = page["metadata"].get("page", "unknown")
+        page_splits = markdown_splitter.split_text(page["text"])
+        for doc in page_splits:
+            doc.metadata["page"] = page_num
+            parent_docs.append(doc)
+
+    # Add parent identifiers
+    for i, doc in enumerate(parent_docs):
+        doc.metadata["parent_id"] = f"parent_{i}"
 
 # Add parent identifiers 
   for i, doc in enumerate(parent_docs):
@@ -107,8 +110,6 @@ try:
         f"[Section: {c.metadata.get('Section', 'N/A')} | Page: {c.metadata.get('page', 'N/A')}]\n{c.page_content}"
         for c in relevant_chunks
     )
-)
-
     tools = [metformin_tool]
     system_prompt = (
         "You are a clinical decision support assistant. Your answers must be completely grounded "
