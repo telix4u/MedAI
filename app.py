@@ -49,11 +49,6 @@ def initialize_agent_and_retriever(pdf_path: str):
     for i, doc in enumerate(parent_docs):
         doc.metadata["parent_id"] = f"parent_{i}"
 
-# Add parent identifiers 
-  for i, doc in enumerate(parent_docs):
-    doc.metadata["parent_id"] = f"parent_{i}"
-
-
     # 3. Embedding and Retriever Components
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
