@@ -9,7 +9,7 @@ from langchain_classic.retrievers import ParentDocumentRetriever, EnsembleRetrie
 from langchain_community.retrievers import BM25Retriever
 from langchain_groq import ChatGroq
 from langchain_core.tools import tool
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
 # Set up page config
@@ -20,14 +20,13 @@ st.caption("AI Agent with Hybrid Parent-Document Retrieval over the drug Monogra
 # --- STEP 1: CACHED RETRIEVER SETUP ---
 @st.cache_resource(show_spinner="Initializing Clinical Retriever (this may take a minute)...")
 def initialize_agent_and_retriever(pdf_path: str):
-    # 1. Read and parse PDF
-   
-    #pdf_markdown_content = pymupdf4llm.to_markdown(pdf_path)
     # 1. Get per-page markdown with metadata
+    # page_data is a list like:
+    # [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
     page_data = pymupdf4llm.to_markdown(pdf_path, page_chunks=True)
-# page_data is a list like:
-  # [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
-    # 2. Structure-Aware Parsing (Markdown Header Splitting)
+
+    # 2. Structure-Aware Parsing (Markdown Header Splitting), done per-page so
+    #    page numbers survive into each chunk's metadata for citations later.
     headers_to_split_on = [
         ("##", "Section"),
         ("###", "Subsection"),
@@ -36,7 +35,7 @@ def initialize_agent_and_retriever(pdf_path: str):
         headers_to_split_on=headers_to_split_on,
         strip_headers=False
     )
-    #parent_docs = markdown_splitter.split_text(pdf_markdown_content)
+
     parent_docs = []
     for page in page_data:
         page_num = page["metadata"].get("page", "unknown")
@@ -85,9 +84,9 @@ try:
     hybrid_retriever = initialize_agent_and_retriever(pdf_file)
 
     # Set up LLM with safety check for API keys
-    groq_api_key = st.secrets.get("GROQ_API_KEY")
+    groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
     if not groq_api_key:
-        st.error("🔑 Groq API Key not found! Please set it in `.streamlit/secrets.toml`.")
+        st.error("🔑 Groq API Key not found! Please set it as an environment variable or in `.streamlit/secrets.toml`.")
         st.stop()
 
     llm = ChatGroq(
@@ -99,12 +98,15 @@ try:
     # Declare the tool inside the loaded scope so it references the cached retriever
     @tool
     def metformin_tool(question: str) -> str:
-    """Searches the Metformin clinical monograph and guidelines..."""
-    relevant_chunks = hybrid_retriever.invoke(question)
-    return "\n\n".join(
-        f"[Section: {c.metadata.get('Section', 'N/A')} | Page: {c.metadata.get('page', 'N/A')}]\n{c.page_content}"
-        for c in relevant_chunks
-    )
+        """Searches the Metformin clinical monograph and guidelines.
+        Use this tool to find clinical pharmacology, warnings, dosage, lactic acidosis risk,
+        eGFR adjustments, and contraindications. Input must be a clear search query."""
+        relevant_chunks = hybrid_retriever.invoke(question)
+        return "\n\n".join(
+            f"[Section: {c.metadata.get('Section', 'N/A')} | Page: {c.metadata.get('page', 'N/A')}]\n{c.page_content}"
+            for c in relevant_chunks
+        )
+
     tools = [metformin_tool]
     system_prompt = (
         "You are a clinical decision support assistant. Your answers must be completely grounded "
@@ -120,7 +122,6 @@ try:
 except Exception as e:
     st.error(f"Initialization Error: {e}")
     st.stop()
-
 
 
 # --- STEP 4: SESSION STATE & CHAT INTERFACE ---
