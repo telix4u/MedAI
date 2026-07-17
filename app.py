@@ -1,9 +1,6 @@
 import os
 import streamlit as st
 import pymupdf4llm
-import pandas as pd
-
-from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -24,9 +21,7 @@ st.caption("AI Agent with Hybrid Parent-Document Retrieval over the drug Monogra
 @st.cache_resource(show_spinner="Initializing Clinical Retriever (this may take a minute)...")
 def initialize_agent_and_retriever(pdf_path: str):
     # 1. Read and parse PDF
-    if not os.path.exists(pdf_path):
-        raise FileNotFoundError(f"Could not find the PDF file at: {pdf_path}")
-
+   
     pdf_markdown_content = pymupdf4llm.to_markdown(pdf_path)
 
     # 2. Structure-Aware Parsing (Markdown Header Splitting)
@@ -46,7 +41,7 @@ def initialize_agent_and_retriever(pdf_path: str):
 
     # 3. Embedding and Retriever Components
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    child_splitter = RecursiveCharacterTextSplitter(chunk_size=150, chunk_overlap=20)
+    child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
     vectorstore = Chroma(collection_name="metformin_child_chunks", embedding_function=embeddings)
     store = InMemoryStore()
 
@@ -55,18 +50,19 @@ def initialize_agent_and_retriever(pdf_path: str):
         vectorstore=vectorstore,
         docstore=store,
         child_splitter=child_splitter,
+        search_kwargs={"k": 3},
         key_to_id="parent_id",
     )
     parent_retriever.add_documents(parent_docs)
 
     # BM25 Sparse Retriever
     bm25_retriever = BM25Retriever.from_documents(parent_docs)
-    bm25_retriever.k = 2
+    bm25_retriever.k = 3
 
     # Hybrid Ensemble
     hybrid_retriever = EnsembleRetriever(
         retrievers=[parent_retriever, bm25_retriever],
-        weights=[0.6, 0.4]
+        weights=[0.5, 0.5]
     )
 
     return hybrid_retriever
@@ -97,7 +93,10 @@ try:
         Use this tool to find clinical pharmacology, warnings, dosage, lactic acidosis risk,
         eGFR adjustments, and contraindications. Input must be a clear search query."""
         relevant_chunks = hybrid_retriever.invoke(question)
-        return "\n\n".join([c.page_content for c in relevant_chunks])
+        return "\n\n".join(
+        f"[Section: {c.metadata.get('Section','?')} | Page: {c.metadata.get('page','?')}]\n{c.page_content}"
+        for c in relevant_chunks
+)
 
     tools = [metformin_tool]
     system_prompt = (
