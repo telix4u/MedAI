@@ -9,3 +9,4 @@ langgraph
 chromadb
 sentence-transformers 
 rank_bm25
+langsmith
