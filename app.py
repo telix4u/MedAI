@@ -1,8 +1,7 @@
 import os
 import streamlit as st
 import pymupdf4llm
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.stores import InMemoryStore
@@ -13,74 +12,55 @@ from langchain_core.tools import tool
 from langchain_core.messages import SystemMessage
 from langgraph.prebuilt import create_react_agent
 
-# Set up page config
-st.set_page_config(page_title="Med AI Clinical Advisor", page_icon="💊", layout="wide")
-st.title("💊 MEDMind AI Clinical Advisor")
-st.caption("AI Agent with Hybrid Hierarchical Parent-Document Retrieval over the drug Monograph")
+# LangSmith Imports
+from langsmith import Client
+from langsmith.evaluation import evaluate
 
 # --- STEP 1: CACHED RETRIEVER SETUP ---
 @st.cache_resource(show_spinner="Initializing Clinical Retriever (this may take a minute)...")
 def initialize_agent_and_retriever(pdf_path: str):
     # 1. Get per-page markdown with metadata
-    # page_data is a list like:
-    # [{"text": "## Dosage\n...", "metadata": {"page": 1, ...}}, {"text": "...", "metadata": {"page": 2, ...}}, ...]
     page_data = pymupdf4llm.to_markdown(pdf_path, page_chunks=True)
 
-    # 2. Hierarchical Chunking (multi-level Recursive Splitting)
-    #    Level 0 (source docs)  -> one Document per page, page number kept in metadata
-    #    Level 1 (parent chunks) -> large, context-rich chunks (~2000 chars) split from each page,
-    #                                used to give the LLM full surrounding context at answer time.
-    #    Level 2 (child chunks)  -> small chunks (~400 chars) split from each parent chunk,
-    #                                these are what actually get embedded/indexed for retrieval.
-    #    ParentDocumentRetriever handles levels 1 -> 2 internally: it stores level-1 parent
-    #    chunks in the docstore, embeds level-2 child chunks in the vectorstore, and maps each
-    #    child chunk back to its parent id so a small, precise vector match still returns the
-    #    full, larger parent context to the LLM.
+    # 2. Structure-Aware Parsing (Markdown Header Splitting)
+    headers_to_split_on = [
+        ("##", "Section"),
+        ("###", "Subsection"),
+    ]
+    markdown_splitter = MarkdownHeaderTextSplitter(
+        headers_to_split_on=headers_to_split_on,
+        strip_headers=False
+    )
 
-    # Level 0: one Document per page (source docs), page number preserved in metadata
-    source_docs = []
+    parent_docs = []
     for page in page_data:
         page_num = page["metadata"].get("page_number", "unknown")
-        source_docs.append(
-            Document(page_content=page["text"], metadata={"page": page_num})
-        )
+        page_splits = markdown_splitter.split_text(page["text"])
+        for doc in page_splits:
+            doc.metadata["page"] = page_num
+            parent_docs.append(doc)
 
-    # Level 1 splitter: large parent chunks (context windows returned to the LLM)
-    parent_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=2000,
-        chunk_overlap=200,
-        separators=["\n## ", "\n### ", "\n\n", "\n", " ", ""],
-    )
-
-    # Level 2 splitter: small child chunks (what gets embedded for similarity search)
-    child_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=400,
-        chunk_overlap=40,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
-
-    # 3. Embedding and Retriever Components
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    vectorstore = Chroma(collection_name="metformin_child_chunks", embedding_function=embeddings)
-    store = InMemoryStore()
-
-    # Hierarchical Parent Retriever (parent_splitter -> child_splitter)
-    parent_retriever = ParentDocumentRetriever(
-        vectorstore=vectorstore,
-        docstore=store,
-        parent_splitter=parent_splitter,
-        child_splitter=child_splitter,
-        search_kwargs={"k": 3},
-    )
-    parent_retriever.add_documents(source_docs)
-
-    # For BM25 (sparse) and for citation metadata, build the same level-1 parent chunks
-    # explicitly so both retrievers in the ensemble are reasoning over identical parent units.
-    parent_docs = parent_splitter.split_documents(source_docs)
+    # Add parent identifiers
     for i, doc in enumerate(parent_docs):
         doc.metadata["parent_id"] = f"parent_{i}"
 
-    # BM25 Sparse Retriever (operates on the same hierarchical parent chunks)
+    # 3. Embedding and Retriever Components
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    child_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=40)
+    vectorstore = Chroma(collection_name="metformin_child_chunks", embedding_function=embeddings)
+    store = InMemoryStore()
+
+    # Parent Retriever
+    parent_retriever = ParentDocumentRetriever(
+        vectorstore=vectorstore,
+        docstore=store,
+        child_splitter=child_splitter,
+        search_kwargs={"k": 3},
+        key_to_id="parent_id",
+    )
+    parent_retriever.add_documents(parent_docs)
+
+    # BM25 Sparse Retriever
     bm25_retriever = BM25Retriever.from_documents(parent_docs)
     bm25_retriever.k = 3
 
@@ -90,19 +70,23 @@ def initialize_agent_and_retriever(pdf_path: str):
         weights=[0.5, 0.5]
     )
 
-    return hybrid_retriever
+    return hybrid_retriever, parent_docs
 
-# --- STEP 2: LOAD ASSETS & DEFINE AGENT ---
+# --- STEP 2: APP INITIALIZATION & MAIN SETUP ---
+st.set_page_config(page_title="Med AI Clinical Advisor", page_icon="💊", layout="wide")
+st.title("💊 MEDMind AI Clinical Advisor")
+st.caption("AI Agent with Hybrid Parent-Document Retrieval & Native LangSmith Evaluation Suite")
+
 pdf_file = "metformin.pdf"
 
 try:
     # Warm up / fetch our retriever
-    hybrid_retriever = initialize_agent_and_retriever(pdf_file)
+    hybrid_retriever, parent_docs = initialize_agent_and_retriever(pdf_file)
 
     # Set up LLM with safety check for API keys
-    groq_api_key = st.secrets.get("GROQ_API_KEY")
+    groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
     if not groq_api_key:
-        st.error("🔑 Groq API Key not found!")
+        st.error("🔑 Groq API Key not found! Please set it as an environment variable or in `.streamlit/secrets.toml`.")
         st.stop()
 
     llm = ChatGroq(
@@ -139,6 +123,82 @@ except Exception as e:
     st.error(f"Initialization Error: {e}")
     st.stop()
 
+# --- STEP 3: OPT-IN LANGSMITH EVALUATION ENGINE (SIDEBAR) ---
+st.sidebar.header("🔬 LangSmith Evaluation Control")
+st.sidebar.write("Create datasets and execute automated QA checks using native Python scoring functions.")
+
+if st.sidebar.button("🚀 Run Automated Evaluation Experiment"):
+    st.sidebar.info("Starting Evaluation Pipeline...")
+    
+    try:
+        # Initialize LangSmith client
+        ls_client = Client()
+        dataset_name = "Metformin Clinical Evaluation Ground Truth"
+
+        # Dynamically create dataset if missing
+        if not ls_client.has_dataset(dataset_name=dataset_name):
+            dataset = ls_client.create_dataset(
+                dataset_name=dataset_name, 
+                description="Ground truth benchmark pairs for Metformin advisor system validation."
+            )
+            
+            # Seed Benchmark QA pairs
+            eval_examples = [
+                {
+                    "inputs": {"question": "What is the action for an eGFR of 35?"},
+                    "outputs": {"reference": "Metformin use can be continued with caution if eGFR is 30-45 mL/min, but regular monitoring is required. New initiation is not recommended."}
+                },
+                {
+                    "inputs": {"question": "What is the maximum daily dose of Metformin?"},
+                    "outputs": {"reference": "The maximum recommended daily dose for adults is typically 2550 mg per day."}
+                }
+            ]
+            
+            for item in eval_examples:
+                ls_client.create_example(
+                    inputs=item["inputs"],
+                    outputs=item["outputs"],
+                    dataset_id=dataset.id
+                )
+            st.sidebar.success(f"Created new reference dataset: {dataset_name}")
+
+        # Target Task Executor Function
+        def run_eval_target(inputs: dict) -> dict:
+            # Evaluate using fresh single-turn chat isolation to ensure clear metrics
+            response = agent.invoke({"messages": [("user", inputs["question"])]})
+            return {"output": response['messages'][-1].content}
+
+        # Native Python Custom Evaluator Function for LangSmith
+        def string_match_correctness(run, example) -> dict:
+            # Extract output string from prediction and reference target entries
+            prediction = run.outputs.get("output", "").lower()
+            reference = example.outputs.get("reference", "").lower()
+            
+            # Simple keyword matching heuristic as an example metric 
+            # (Can be substituted with LLM-as-a-judge patterns if needed)
+            keywords = ["egfr", "dose", "mg", "caution", "monitor", "maximum"]
+            matched_keywords = [kw for kw in keywords if kw in prediction and kw in reference]
+            score = len(matched_keywords) / len(keywords) if len(matched_keywords) > 0 else 0.0
+
+            return {
+                "key": "keyword_overlap_score",
+                "score": round(score, 2),
+                "comment": f"Matched baseline semantic keywords: {matched_keywords}"
+            }
+
+        # Run evaluation project infrastructure
+        experiment_results = evaluate(
+            run_eval_target,
+            data=dataset_name,
+            evaluators=[string_match_correctness],
+            experiment_prefix="llama33-hybrid-rag-eval",
+        )
+        
+        st.sidebar.success("✅ Evaluation complete! Traces pushed to LangSmith dashboard.")
+        st.sidebar.balloons()
+        
+    except Exception as eval_err:
+        st.sidebar.error(f"Evaluation Execution Error: {eval_err}")
 
 # --- STEP 4: SESSION STATE & CHAT INTERFACE ---
 if "messages" not in st.session_state:
@@ -170,7 +230,7 @@ if user_input := st.chat_input("Ask a clinical question (e.g., 'What is the acti
                     elif msg["role"] == "assistant":
                         formatted_history.append(("assistant", msg["content"]))
 
-                # Invoke the agent
+                # Invoke the agent (automagically logs tracing logs to LangSmith)
                 response = agent.invoke({"messages": formatted_history})
 
                 # Extract the final answer content from the agent's graph execution
